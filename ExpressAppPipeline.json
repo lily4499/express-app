@@ -1,0 +1,63 @@
+{
+    "pipeline": {
+        "name": "ExpressAppPipeline",
+        "roleArn": "arn:aws:iam::637423529262:role/CodeDeployEC2Role",
+        "artifactStore": {
+            "type": "S3",
+            "location": "lili-s3-bucket"
+        },
+        "stages": [
+            {
+                "name": "Source",
+                "actions": [
+                    {
+                        "name": "SourceAction",
+                        "actionTypeId": {
+                            "category": "Source",
+                            "owner": "ThirdParty",
+                            "provider": "GitHub",
+                            "version": "1"
+                        },
+                        "runOrder": 1,
+                        "configuration": {
+                            "Owner": "lily4499",
+                            "Repo": "express-app",
+                            "Branch": "main",
+			    "OAuthToken": "$(aws secretsmanager get-secret-value --secret-id GitHubToken --query SecretString --output text)"
+                        },
+                        "outputArtifacts": [
+                            {
+                                "name": "SourceArtifact"
+                            }
+                        ]
+                    }
+                ]
+            },
+            {
+                "name": "Deploy",
+                "actions": [
+                    {
+                        "name": "DeployAction",
+                        "actionTypeId": {
+                            "category": "Deploy",
+                            "owner": "AWS",
+                            "provider": "CodeDeploy",
+                            "version": "1"
+                        },
+                        "runOrder": 1,
+                        "configuration": {
+                            "ApplicationName": "ExpressApp",
+                            "DeploymentGroupName": "ExpressAppDG"
+                        },
+                        "inputArtifacts": [
+                            {
+                                "name": "SourceArtifact"
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    }
+}
+
