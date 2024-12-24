@@ -1,0 +1,580 @@
+Here’s a step-by-step guide to create an Express.js application, store its source code in AWS CodeCommit, 
+automate deployment to an Amazon EC2 instance using AWS CodePipeline, and monitor/test the deployment.
+
+
+1. Create the Express.js Application
+Install Prerequisites
+
+sudo apt update
+sudo apt install -y nodejs npm git
+
+Set Up the Project
+
+mkdir express-app && cd express-app
+npm init -y
+npm install express
+
+Create index.js
+
+cat <<EOF > index.js
+const express = require('express');
+const app = express();
+
+app.get('/', (req, res) => {
+    res.send('Hello, World!');
+});
+
+const PORT = 3000;
+app.listen(PORT, () => {
+    console.log(\`Server is running on http://localhost:\${PORT}\`);
+});
+EOF
+
+Test Locally
+
+node index.js
+
+Open your browser and visit: http://localhost:3000.
+Add .gitignore
+
+echo "node_modules/" > .gitignore
+
+2. Push Code to AWS CodeCommit
+Create a CodeCommit Repository
+
+aws codecommit create-repository --repository-name express-app-repo --repository-description "Express.js application"
+
+Clone the Repository
+
+git clone https://git-codecommit.<region>.amazonaws.com/v1/repos/express-app-repo
+cd express-app-repo
+
+Push Code to CodeCommit
+
+cp -r ../express-app/* .
+git init
+git add .
+git commit -m "Initial commit"
+git push origin master
+
+3. Launch and Configure EC2 Instance
+Launch an EC2 Instance
+
+    Use the CLI to launch an instance with Amazon Linux 2 or Ubuntu:
+
+    aws ec2 run-instances \
+        --image-id <AMI_ID> \
+        --count 1 \
+        --instance-type t2.micro \
+        --key-name <KEY_PAIR_NAME> \
+        --security-group-ids <SECURITY_GROUP_ID> \
+        --subnet-id <SUBNET_ID> \
+        --iam-instance-profile Name=EC2CodeDeployRole \
+        --tag-specifications 'ResourceType=instance,Tags=[{Key=Name,Value=ExpressAppInstance}]'
+
+Install Node.js and PM2
+
+    SSH into the EC2 instance:
+
+ssh -i <key-pair.pem> ec2-user@<EC2_PUBLIC_IP>
+
+Install dependencies:
+
+    sudo yum update -y
+    sudo yum install -y nodejs npm
+    sudo npm install -g pm2
+
+4. Set Up CodeDeploy
+Create a CodeDeploy Application
+
+aws deploy create-application --application-name ExpressApp
+
+Create a Deployment Group
+
+    Create an IAM role with AWSCodeDeployRole attached.
+    Create the deployment group:
+
+    aws deploy create-deployment-group \
+        --application-name ExpressApp \
+        --deployment-group-name ExpressAppDG \
+        --service-role-arn <CodeDeployServiceRoleARN> \
+        --ec2-tag-filters Key=Name,Value=ExpressAppInstance,Type=KEY_AND_VALUE \
+        --deployment-config-name CodeDeployDefault.AllAtOnce
+
+5. Configure CodePipeline
+Create CodePipeline
+
+    Create a pipeline with source and deployment stages:
+
+    aws codepipeline create-pipeline --pipeline \
+    '{
+        "name": "ExpressAppPipeline",
+        "roleArn": "<CodePipelineRoleARN>",
+        "artifactStore": {
+            "type": "CODEPIPELINE",
+            "location": "codepipeline-artifact-location"
+        },
+        "stages": [
+            {
+                "name": "Source",
+                "actions": [
+                    {
+                        "name": "SourceAction",
+                        "actionTypeId": {
+                            "category": "Source",
+                            "owner": "AWS",
+                            "provider": "CodeCommit",
+                            "version": "1"
+                        },
+                        "runOrder": 1,
+                        "configuration": {
+                            "RepositoryName": "express-app-repo",
+                            "BranchName": "master"
+                        },
+                        "outputArtifacts": [
+                            {
+                                "name": "SourceArtifact"
+                            }
+                        ]
+                    }
+                ]
+            },
+            {
+                "name": "Deploy",
+                "actions": [
+                    {
+                        "name": "DeployAction",
+                        "actionTypeId": {
+                            "category": "Deploy",
+                            "owner": "AWS",
+                            "provider": "CodeDeploy",
+                            "version": "1"
+                        },
+                        "runOrder": 1,
+                        "configuration": {
+                            "ApplicationName": "ExpressApp",
+                            "DeploymentGroupName": "ExpressAppDG"
+                        },
+                        "inputArtifacts": [
+                            {
+                                "name": "SourceArtifact"
+                            }
+                        ]
+                    }
+                ]
+            }
+        ]
+    }'
+
+6. Configure the Application for Deployment
+Add an AppSpec File
+
+Create appspec.yml in your repository:
+
+version: 0.0
+os: linux
+files:
+  - source: /
+    destination: /home/ec2-user/express-app
+hooks:
+  AfterInstall:
+    - location: scripts/install_dependencies.sh
+      timeout: 300
+    - location: scripts/start_server.sh
+      timeout: 300
+
+Create Deployment Scripts
+
+    scripts/install_dependencies.sh:
+
+#!/bin/bash
+cd /home/ec2-user/express-app
+npm install
+
+scripts/start_server.sh:
+
+#!/bin/bash
+cd /home/ec2-user/express-app
+pm2 start index.js --name "express-app"
+
+Make scripts executable:
+
+    chmod +x scripts/*.sh
+
+Push Updates to CodeCommit
+
+git add .
+git commit -m "Add deployment configuration"
+git push origin master
+
+7. Deploy the Application
+Trigger a Deployment
+
+aws deploy create-deployment \
+    --application-name ExpressApp \
+    --deployment-group-name ExpressAppDG \
+    --revision "{\"revisionType\":\"AppSpecContent\",\"appSpecContent\":{\"content\":\"$(cat appspec.yml | base64)\"}}"
+
+8. Test the Application
+
+    Visit http://<EC2_PUBLIC_IP>:3000 in your browser.
+    Check application logs on the EC2 instance:
+
+    pm2 logs
+
+9. Monitor Deployment
+
+    Use AWS CLI to check deployment status:
+
+aws deploy get-deployment --deployment-id <DeploymentID>
+
+Use CloudWatch to monitor logs and metrics:
+
+    aws logs get-log-events --log-group-name "/aws/codedeploy/ExpressApp"
+
+
+
+
+#####################################################################################################################
+
+lilia@liliane:~/express-app$ aws iam get-role --role-name CodeDeployEC2Role
+{
+    "Role": {
+        "Path": "/",
+        "RoleName": "CodeDeployEC2Role",
+        "RoleId": "AROAZI2LHFUXFBAEJZDE7",
+        "Arn": "arn:aws:iam::637423529262:role/CodeDeployEC2Role",
+        "CreateDate": "2024-12-24T00:20:40+00:00",
+        "AssumeRolePolicyDocument": {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Effect": "Allow",
+                    "Principal": {
+                        "Service": "ec2.amazonaws.com"
+                    },
+                    "Action": "sts:AssumeRole"
+                }
+            ]
+        },
+        "MaxSessionDuration": 3600,
+        "RoleLastUsed": {
+
+
+            -----------------------------------------------------
+
+lilia@liliane:~/express-app$ vim ExpressAppPipeline.json
+lilia@liliane:~/express-app$ aws codepipeline create-pipeline --cli-input-json file://ExpressAppPipeline.json
+
+An error occurred (ValidationException) when calling the CreatePipeline operation: 1 validation error detected: Value at 'pipeline.artifactStore.type' failed to satisfy constraint: Member must satisfy enum value set: [S3]
+lilia@liliane:~/express-app$ aws s3api create-bucket --bucket my-s3-bucket --region us-east-1
+
+An error occurred (BucketAlreadyExists) when calling the CreateBucket operation: The requested bucket name is not available. The bucket namespace is shared by all users of the system. Please select a different name and try again.
+lilia@liliane:~/express-app$ aws s3api create-bucket --bucket lili-s3-bucket --region us-east-
+1
+{
+    "Location": "/lili-s3-bucket"
+}
+lilia@liliane:~/express-app$ vim ExpressAppPipeline.json
+lilia@liliane:~/express-app$ aws codepipeline create-pipeline --cli-input-json file://ExpressAppPipeline.json
+
+An error occurred (InvalidStructureException) when calling the CreatePipeline operation: CodePipeline is not authorized to perform AssumeRole on role arn:aws:iam::637423529262:role/CodeDeployEC2Role
+lilia@liliane:~/express-app$ aws iam update-assume-role-policy \
+    --role-name CodeDeployEC2Role \
+    --policy-document '{
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Effect": "Allow",
+                "Principal": {
+                    "Service": "codepipeline.amazonaws.com"
+                },
+                "Action": "sts:AssumeRole"
+            }
+        ]
+    }'
+lilia@liliane:~/express-app$ aws codepipeline create-pipeline --cli-input-json file://ExpressAppPipeline.json
+
+An error occurred (InvalidActionDeclarationException) when calling the CreatePipeline operation: Action configuration for action 'SourceAction' is missing required configuration 'OAuthToken'
+lilia@liliane:~/express-app$ vim ExpressAppPipeline.json
+lilia@liliane:~/express-app$ aws codepipeline create-pipeline --cli-input-json file://ExpressAppPipeline.json
+{
+    "pipeline": {
+        "name": "ExpressAppPipeline",
+        "roleArn": "arn:aws:iam::637423529262:role/CodeDeployEC2Role",
+        "artifactStore": {
+            "type": "S3",
+            "location": "lili-s3-bucket"
+        },
+        "stages": [
+            {
+                "name": "Source",
+                "actions": [
+                    {
+                        "name": "SourceAction",
+                        "actionTypeId": {
+                            "category": "Source",
+                            "owner": "ThirdParty",
+                            "provider": "GitHub",
+                            "version": "1"
+                        },
+                        "runOrder": 1,
+                        "configuration": {
+                            "Branch": "main",
+                            "OAuthToken": "****",
+
+
+
+-----------------------------------------------------------------------------
+
+
+lilia@liliane:~/express-app$ vim appspec.yml
+lilia@liliane:~/express-app$ mkdir scripts
+lilia@liliane:~/express-app$ vim scripts/install_dependencies.sh
+lilia@liliane:~/express-app$ vim scripts/start_server.sh
+lilia@liliane:~/express-app$ chmod +x scripts/*.sh
+lilia@liliane:~/express-app$ git add .
+lilia@liliane:~/express-app$ git commit -m "add setup files"
+[main e59771c] add setup files
+ 5 files changed, 96 insertions(+)
+ create mode 100644 ExpressAppPipeline.json
+ create mode 100644 appspec.yml
+ create mode 100755 scripts/install_dependencies.sh
+ create mode 100755 scripts/start_server.sh
+ create mode 100644 trust-policy.json
+lilia@liliane:~/express-app$ git push
+Enumerating objects: 9, done.
+Counting objects: 100% (9/9), done.
+Delta compression using up to 12 threads
+Compressing objects: 100% (8/8), done.
+Writing objects: 100% (8/8), 1.47 KiB | 1.47 MiB/s, done.
+Total 8 (delta 0), reused 0 (delta 0), pack-reused 0
+remote: error: GH013: Repository rule violations found for refs/heads/main.
+remote:
+remote: - GITHUB PUSH PROTECTION
+remote:   —————————————————————————————————————————
+remote:     Resolve the following violations before pushing again
+remote:
+remote:     - Push cannot contain secrets
+remote:
+remote:
+remote:      (?) Learn how to resolve a blocked push
+remote:      https://docs.github.com/code-security/secret-scanning/working-with-secret-scanning-and-push-protection/working-with-push-protection-from-the-command-line#resolving-a-blocked-push
+remote:
+remote:
+remote:       —— GitHub Personal Access Token ——————————————————————
+remote:        locations:
+remote:          - commit: e59771c98981aaec443ac3f261197596b2d6705d
+remote:            path: ExpressAppPipeline.json:26
+remote:
+remote:        (?) To push, remove secret from commit(s) or follow this URL to allow the secret.
+remote:        https://github.com/lily4499/express-app/security/secret-scanning/unblock-secret/2qdqmjkijMYjsbmpYrtdvRVTbkO
+remote:
+remote:
+remote:
+To https://github.com/lily4499/express-app.git
+ ! [remote rejected] main -> main (push declined due to repository rule violations)
+error: failed to push some refs to 'https://github.com/lily4499/express-app.git'
+lilia@liliane:~/express-app$ aws secretsmanager create-secret --name GitHubToken --secret-string "ghp_############"
+{
+    "ARN": "arn:aws:secretsmanager:us-east-1:637423529262:secret:GitHubToken-6Iczwo",
+    "Name": "GitHubToken",
+    "VersionId": "3a806b53-040e-44af-8ce7-578268fea8d5"
+}
+lilia@liliane:~/express-app$ vim ExpressAppPipeline.json
+lilia@liliane:~/express-app$ git reset --soft HEAD~1
+lilia@liliane:~/express-app$ git restore --staged ExpressAppPipeline.json
+lilia@liliane:~/express-app$ git commit -m "Remove secret from pipeline configuration"
+[main 330ba2d] Remove secret from pipeline configuration
+ 4 files changed, 33 insertions(+)
+ create mode 100644 appspec.yml
+ create mode 100755 scripts/install_dependencies.sh
+ create mode 100755 scripts/start_server.sh
+ create mode 100644 trust-policy.json
+lilia@liliane:~/express-app$ git add ExpressAppPipeline.json
+lilia@liliane:~/express-app$ git commit -m "Update pipeline configuration without secrets"
+[main e949f6a] Update pipeline configuration without secrets
+ 1 file changed, 63 insertions(+)
+ create mode 100644 ExpressAppPipeline.json
+lilia@liliane:~/express-app$ git push --force
+Enumerating objects: 11, done.
+Counting objects: 100% (11/11), done.
+Delta compression using up to 12 threads
+Compressing objects: 100% (10/10), done.
+Writing objects: 100% (10/10), 1.70 KiB | 1.70 MiB/s, done.
+Total 10 (delta 1), reused 0 (delta 0), pack-reused 0
+remote: Resolving deltas: 100% (1/1), done.
+To https://github.com/lily4499/express-app.git
+   8eb3c19..e949f6a  main -> main
+lilia@liliane:~/express-app$ git rev-parse HEAD
+e949f6a54a1abcc51f772ed291d62c31dfe023f6
+lilia@liliane:~/express-app$ aws deploy create-deployment \
+    --application-name ExpressApp \
+    --deployment-group-name ExpressAppDG \
+    --revision "{\"revisionType\":\"GitHub\",\"gitHubLocation\":{\"repository\":\"lily4499/express-app\",\"commitId\":\"e949f6a54a1abcc51f772ed291d62c31dfe023f6\"}}"
+
+An error occurred (InvalidRoleException) when calling the CreateDeployment operation: AWS CodeDeploy does not have the permissions required to assume the role arn:aws:iam::637423529262:role/CodeDeployEC2Role.
+lilia@liliane:~/express-app$ aws iam update-assume-role-policy \
+    --role-name CodeDeployEC2Role \
+    --policy-document '{
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Effect": "Allow",
+                "Principal": {
+                    "Service": "codedeploy.amazonaws.com"
+                },
+                "Action": "sts:AssumeRole"
+            }
+        ]
+    }'
+lilia@liliane:~/express-app$ aws deploy create-deployment     --application-name ExpressApp     --deployment-group-name ExpressAppDG     --revision "{\"revisionType\":\"GitHub\",\"gitHubLocation\":{\"repository\":\"lily4499/express-app\",\"commitId\":\"e949f6a54a1abcc51f772ed291d62c31dfe023f6\"}}"
+{
+    "deploymentId": "d-05CUXS87A"
+}
+lilia@liliane:~/express-app$ aws deploy get-deployment --deployment-id d-05CUXS87A
+{
+    "deploymentInfo": {
+        "applicationName": "ExpressApp",
+        "deploymentGroupName": "ExpressAppDG",
+        "deploymentConfigName": "CodeDeployDefault.AllAtOnce",
+        "deploymentId": "d-05CUXS87A",
+        "revision": {
+            "revisionType": "GitHub",
+            "gitHubLocation": {
+                "repository": "lily4499/express-app",
+                "commitId": "e949f6a54a1abcc51f772ed291d62c31dfe023f6"
+            }
+        },
+        "status": "Failed",
+        "errorInformation": {
+            "code": "NO_INSTANCES",
+            "message": "The deployment failed because no instances were found for your deployment group. Check your deployment group settings to make sure the tags for your Amazon EC2 instances or Auto Scaling groups correctly identify the instances you want to deploy to, and then try again."
+        },
+        "createTime": "2024-12-23T20:25:19.750000-05:00",
+        "completeTime": "2024-12-23T20:25:21.180000-05:00",
+:
+
+------------------------------------------------
+
+
+lilia@liliane:~/express-app$ aws deploy update-deployment-group \
+    --application-name ExpressApp \
+    --current-deployment-group-name ExpressAppDG \
+    --ec2-tag-filters Key=Name,Value=Ubuntu-Server,Type=KEY_AND_VALUE
+lilia@liliane:~/express-app$ aws deploy get-deployment-group \
+    --application-name ExpressApp \
+    --deployment-group-name ExpressAppDG
+{
+    "deploymentGroupInfo": {
+        "applicationName": "ExpressApp",
+        "deploymentGroupId": "58fce65b-92a2-4061-bbce-aa31c943adc5",
+        "deploymentGroupName": "ExpressAppDG",
+        "deploymentConfigName": "CodeDeployDefault.AllAtOnce",
+        "ec2TagFilters": [
+            {
+                "Key": "Name",
+                "Value": "Ubuntu-Server",
+                "Type": "KEY_AND_VALUE"
+            }
+        ],
+        "onPremisesInstanceTagFilters": [],
+        "autoScalingGroups": [],
+        "serviceRoleArn": "arn:aws:iam::637423529262:role/CodeDeployEC2Role",
+        "triggerConfigurations": [],
+        "deploymentStyle": {
+            "deploymentType": "IN_PLACE",
+            "deploymentOption": "WITHOUT_TRAFFIC_CONTROL"
+        },
+        "outdatedInstancesStrategy": "UPDATE",
+        "lastAttemptedDeployment": {
+            "deploymentId": "d-05CUXS87A",
+            "status": "Failed",
+            "endTime": "2024-12-23T20:25:21.180000-05:00",
+            "createTime": "2024-12-23T20:25:19.750000-05:00"
+        },
+        "computePlatform": "Server",
+        "terminationHookEnabled": false
+    }
+}
+:
+
+
+------------------------------------------------------------------------------------
+
+
+lilia@liliane:~/express-app$ aws deploy create-deployment \
+    --application-name ExpressApp \
+    --deployment-group-name ExpressAppDG \
+    --revision "{\"revisionType\":\"GitHub\",\"gitHubLocation\":{\"repository\":\"lily4499/express-app\",\"commitId\":\"e949f6a54a1abcc51f772ed291d62c31dfe023f6\"}}"
+{
+    "deploymentId": "d-NHZM3V87A"
+}
+lilia@liliane:~/express-app$ aws deploy get-deployment --deployment-id d-NHZM3V87A
+{
+    "deploymentInfo": {
+        "applicationName": "ExpressApp",
+        "deploymentGroupName": "ExpressAppDG",
+        "deploymentConfigName": "CodeDeployDefault.AllAtOnce",
+        "deploymentId": "d-NHZM3V87A",
+        "revision": {
+            "revisionType": "GitHub",
+            "gitHubLocation": {
+                "repository": "lily4499/express-app",
+                "commitId": "e949f6a54a1abcc51f772ed291d62c31dfe023f6"
+            }
+        },
+        "status": "InProgress",
+        "createTime": "2024-12-23T20:34:29.631000-05:00",
+        "deploymentOverview": {
+            "Pending": 1,
+            "InProgress": 0,
+            "Succeeded": 0,
+            "Failed": 0,
+            "Skipped": 0,
+            "Ready": 0
+        },
+        "creator": "user",
+        "ignoreApplicationStopFailures": false,
+        "updateOutdatedInstancesOnly": false,
+        "deploymentStyle": {
+:
+
+--------------------------------------------------------
+
+
+lilia@liliane:~/express-app$ vim appspec.yml
+lilia@liliane:~/express-app$ chmod +x scripts/start_server.sh
+lilia@liliane:~/express-app$ git add .
+lilia@liliane:~/express-app$ git commit -m "update appspec.yml"
+[main d009646] update appspec.yml
+ 1 file changed, 4 insertions(+), 1 deletion(-)
+lilia@liliane:~/express-app$ git push
+Enumerating objects: 5, done.
+Counting objects: 100% (5/5), done.
+Delta compression using up to 12 threads
+Compressing objects: 100% (3/3), done.
+Writing objects: 100% (3/3), 336 bytes | 336.00 KiB/s, done.
+Total 3 (delta 2), reused 0 (delta 0), pack-reused 0
+remote: Resolving deltas: 100% (2/2), completed with 2 local objects.
+To https://github.com/lily4499/express-app.git
+   e949f6a..d009646  main -> main
+lilia@liliane:~/express-app$ git rev-parse HEAD
+d009646fe18ae4601f0cb463d80b7711c9d13aae
+lilia@liliane:~/express-app$ aws deploy create-deployment \
+    --application-name ExpressApp \
+    --deployment-group-name ExpressAppDG \
+    --revision "{\"revisionType\":\"GitHub\",\"gitHubLocation\":{\"repository\":\"lily4499/express-app\",\"commitId\":\"d009646fe18ae4601f0cb463d80b7711c9d13aae\"}}"
+{
+    "deploymentId": "d-KDJJ0L97A"
+}
+lilia@liliane:~/express-app$ vim notes.txt
+lilia@liliane:~/express-app$ code .
+lilia@liliane:~/express-app$ lilia@liliane:~/express-app$ aws deploy create-deployment \
+    --application-name ExpressApp \
+    --deployment-group-name ExpressAppDG \
+    --revision "{\"revisionType\":\"GitHub\",\"gitHubLocation\":{\"repository\":\"lily4499/express-app\",\"commitId\":\"e949f6a54a1abcc51f772ed291d62c31dfe023f6\"}}"
+{
+    "deploymentId": "d-NHZM3V87A"
+}
+lilia@liliane:~/express-app$ aws deploy get-deployment --deployment-id d-NHZM3V87A
